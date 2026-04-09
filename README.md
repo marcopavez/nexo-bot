@@ -124,157 +124,171 @@ src/
 ├── app/
 │   └── api/
 │       └── whatsapp/
-│           └── route.ts   ← webhook: GET (verify) + POST (messages)
+│           └── route.ts        ← webhook: GET (verify) + POST (messages)
 └── lib/
-    ├── types.ts            ← shared TypeScript types
-    ├── prompts.ts          ← system prompt builder per business type
-    ├── claude.ts           ← Claude Haiku API client
-    ├── whatsapp.ts         ← Meta Cloud API client + signature verification
-    ├── redis.ts            ← Upstash Redis conversation history
-    └── supabase.ts         ← bot config + lead storage
+    ├── types.ts                ← shared TypeScript types (Bot, ChatResult, Intent, etc.)
+    ├── env.ts                  ← environment variable validation (Proxy pattern)
+    ├── logger.ts               ← structured JSON logging with correlation IDs
+    ├── prompts.ts              ← system prompt builder per business type
+    ├── intents.ts              ← keyword-based intent detection (fast path)
+    ├── claude.ts               ← Claude Haiku client (timeout, retry, tool use, LLM intent classification)
+    ├── booking.ts              ← booking flow: field extraction, corrections, missing-field prompts
+    ├── orchestrator.ts         ← message pipeline: handleHandoff → handleBooking → handleLLMFlow
+    ├── whatsapp.ts             ← Meta Cloud API client + signature verification
+    ├── redis.ts                ← conversation history, dedup, rate limiting, circuit breaker
+    └── supabase.ts             ← bot config, conversations, leads, bookings (atomic upsert)
 supabase/
-└── schema.sql              ← run once in Supabase SQL Editor
+└── schema.sql                  ← run once in Supabase SQL Editor
 ```
 
 ---
 
 ## Cost per client (estimated)
 
-| Component | $/month |
-|---|---|
-| Claude Haiku (~200 conv/day) | ~$8–15 |
-| Meta Cloud API (<1K conv/mo) | Free |
-| Vercel (shared) | Free tier |
-| Upstash Redis (shared) | Free tier |
-| Supabase (shared) | Free tier |
-| **Total** | **~$10–15** |
+| Component | $/month (low volume) | $/month (~200 conv/day) |
+|---|---|---|
+| Claude Haiku | ~$8–15 | ~$70 |
+| Meta Cloud API (<1K conv/mo) | Free | Free |
+| Vercel (shared) | Free tier | Free tier |
+| Upstash Redis (shared) | Free tier | ~$1 (paid tier) |
+| Supabase (shared) | Free tier | Free–$25 (Pro at ~5 clients) |
+| **Total** | **~$10–15** | **~$70–100** |
 
 Recommended client price: $80.000–150.000 CLP/month.
 
-## Roadmap — Chatbot de Producción (Funcional y Seguro)
+> **Note:** The higher estimate accounts for LLM intent classification calls (~$0.0001/msg extra) and realistic conversation volumes. Free tiers for Upstash (10K commands/day) and Supabase (500MB DB) will be exhausted before client #5 at production volume.
 
-Objetivo: pasar de demo a un chatbot en producción para WhatsApp, con seguridad, trazabilidad, observabilidad y operación continua.
+---
 
-### Fase 1 — Fundaciones Técnicas (Semanas 1-2)
+## Project status
 
-- Definir alcance v1 para WhatsApp exclusivamente:
-  - FAQ del negocio.
-  - Captura de leads.
-  - Agendamiento.
-  - Cotizaciones.
-  - Handoff a humano cuando la confianza de respuesta sea baja o la intención no coincida con la consulta.
-- Definir stack inicial enfocado en costo bajo y velocidad de ejecución:
-  - `Canal`: WhatsApp Cloud API oficial de Meta.
-  - `Backend`: Typescript y React.
-  - `LLM layer`: proveedor económico con buen costo por token. Recomendación inicial: OpenRouter para enrutar a modelos baratos y mantener flexibilidad de cambio.
-  - `Base de datos`: PostgreSQL.
-  - `Cache/colas`: postergar Redis en v1 si no es estrictamente necesario para no subir costos.
-  - `Infraestructura`: Railway o Render para backend; Supabase para PostgreSQL si el costo y límites calzan con la etapa inicial.
-- Definir estructura lógica del sistema:
-  - `Webhook de WhatsApp`: recibe mensajes entrantes desde Meta.
-  - `Orquestador`: clasifica intención y decide entre FAQ, lead, agenda, cotización o escalamiento.
-  - `Motor de reglas`: maneja validaciones, estados de conversación y reglas de negocio.
-  - `Servicio LLM`: responde consultas abiertas dentro de límites definidos.
-  - `Persistencia`: guarda conversaciones, leads, cotizaciones, auditoría y estado de sesión.
-- Definir política de datos desde el inicio:
-  - Datos permitidos: nombre completo, edad, correo electrónico, número telefónico y dirección.
-  - Datos prohibidos: RUT y cualquier otro dato sensible.
-  - Guardar solo lo necesario para operar, cotizar y dar seguimiento comercial.
-- Crear ambientes separados: `dev`, `staging`, `prod`.
-- Configurar CI/CD con deploy automático a `staging` y deploy protegido a `prod`.
-- Definir meta operativa de Fase 1:
-  - Tener esta semana un backend funcional en `staging` con webhook activo, flujo básico de FAQ, captura de lead, agendamiento simple y cotización inicial.
+**Phase 1 — code complete, pending end-to-end testing.**
+
+### What's built
+
+- [x] WhatsApp webhook (GET verify + POST messages, returns 200 immediately)
+- [x] Multi-tenant bot config via `phone_number_id` lookup
+- [x] Intent detection: keyword fast path + LLM fallback for ambiguous Chilean Spanish
+- [x] Booking flow with field extraction and correction handling
+- [x] Lead capture via Claude tool use (`capture_lead` structured output)
+- [x] Conversation context: Redis (20-msg hot window, 24h TTL) + Supabase (full history)
+- [x] Owner notifications on WhatsApp for leads, bookings, and handoffs
+- [x] Atomic conversation upsert (no race conditions)
+- [x] Claude API: 15s timeout, retry on 429/529, token usage logging
+- [x] Per-user rate limiting (10 msg/min sliding window in Redis)
+- [x] Circuit breaker for Anthropic API (3 failures → 60s cooldown → fallback reply)
+- [x] Environment validation via Proxy (fails loudly on missing vars)
+- [x] Structured JSON logging with correlation IDs
+
+### What's NOT built yet
+
+- [ ] Separate environments (dev/staging/prod)
+- [ ] CI/CD pipeline
+- [ ] Test suite (unit, integration, E2E)
+- [ ] Operations panel / frontend UI
+- [ ] RAG with client knowledge bases
+- [ ] RLS on Supabase tables
+- [ ] Prompt injection protection / output guardrails
+- [ ] Authentication (JWT, RBAC) for future admin panel
+
+---
+
+## Known issues and fixes needed
+
+### Minor (low risk, can ship without)
+
+| Issue | Description | Where |
+|---|---|---|
+| Owner notification is untracked | Notifications to `owner_whatsapp` are sent from the bot's own number and don't appear in any conversation record | `orchestrator.ts` |
+| Log schema incomplete | Missing `service`, `environment`, `bot_id`, `durationMs` as first-class fields | `logger.ts` |
+| Intent false positives | "valor" matches quote intent but "cuánto vale tu esfuerzo" is not a quote request | `intents.ts` |
+
+### Major (must fix before production)
+
+| Issue | Description | Where |
+|---|---|---|
+| No RLS on Supabase tables | `SUPABASE_SERVICE_ROLE_KEY` bypasses all Row Level Security. A bug in tenant resolution could leak data between clients | `supabase.ts`, `schema.sql` |
+| No prompt injection protection | User input goes directly into the LLM context with no sanitization or output filtering | `orchestrator.ts`, `prompts.ts` |
+| No test suite | Zero tests — logic changes can break booking, intent, or lead capture without detection | — |
+| No CI/CD | Deploying to production has no gates, no tests, no review | — |
+| Vercel cold starts | On free tier, cold start variance can push response time > 4s. No kept-warm strategy | `route.ts` |
+
+---
+
+## Roadmap
+
+### Fase 1 — Fundaciones Técnicas ✅ (code complete)
+
+- [x] WhatsApp Cloud API webhook con verificación de firma
+- [x] Orquestador con pipeline: dedup → rate limit → classify → dispatch → deliver
+- [x] Detección de intención: keywords (fast path) + LLM (fallback para español chileno)
+- [x] Flujos: FAQ, captura de lead, agendamiento, cotización, handoff a humano
+- [x] Persistencia dual: Redis (contexto caliente) + Supabase (historial completo)
+- [x] Rate limiting por usuario + circuit breaker para API externa
+- [x] Logging estructurado con correlation IDs
+- [ ] **Pendiente:** testing end-to-end con número WhatsApp real
+- [ ] **Pendiente:** ambientes separados dev/staging/prod
+- [ ] **Pendiente:** CI/CD con tests bloqueando deploy
 
 ### Fase 2 — Núcleo Funcional (Semanas 3-4)
 
-- Implementar flujo de conversación híbrido:
-  - Ruta 1: respuestas determinísticas (FAQs críticas y flujos de negocio).
-  - Ruta 2: respuestas con LLM para preguntas abiertas.
-  - Ruta 3: handoff a humano por reglas (intención de compra, reclamo, baja confianza).
-- Implementar memoria controlada:
-  - Contexto corto por sesión.
-  - Datos persistentes mínimos por cliente (empresa, rubro, historial relevante).
-- Implementar RAG (si aplica) con base de conocimiento del cliente:
-  - Políticas, catálogo, horarios, cobertura, precios.
-  - Versionado de documentos para trazabilidad.
-- Implementar panel mínimo operativo:
-  - Ver conversaciones.
-  - Etiquetar intents.
-  - Activar/desactivar flujos.
+- [ ] RAG con pgvector para base de conocimiento por cliente (catálogo, políticas, cobertura, precios)
+- [ ] Versionado de documentos para trazabilidad
+- [ ] Panel mínimo operativo: ver conversaciones, etiquetar intents, activar/desactivar flujos
+- [ ] Memoria persistente mínima por cliente (empresa, rubro, historial relevante)
 
 ### Fase 3 — Seguridad y Cumplimiento (Semanas 5-6)
 
-- Autenticación y autorización:
-  - JWT de corta duración.
-  - RBAC (admin, operador, solo lectura).
-  - MFA para cuentas administrativas.
-- Protección de datos:
-  - Cifrado en tránsito (TLS) y en reposo (DB y backups).
-  - Gestión de secretos en vault (no secretos en repo).
-  - Minimización y retención de datos por política.
-- Protección de aplicación:
-  - Rate limiting por IP, sesión y cliente.
-  - WAF + validación estricta de payloads.
-  - Sanitización de inputs contra prompt injection y contenido malicioso.
-- Seguridad LLM:
-  - System prompts versionados y auditables.
-  - Guardrails de salida (PII, toxicidad, respuestas fuera de política).
-  - Deny-list de herramientas y dominios no permitidos.
-- Cumplimiento y legal:
-  - Consentimiento explícito para uso de datos.
-  - Términos de servicio y política de privacidad públicas.
-  - Registro de auditoría para acciones sensibles.
+- [ ] RLS en todas las tablas de Supabase (policies por `bot_id`)
+- [ ] Autenticación JWT + RBAC (admin, operador, solo lectura) para panel operativo
+- [ ] Sanitización de inputs contra prompt injection
+- [ ] Guardrails de salida LLM (PII, toxicidad, respuestas fuera de política)
+- [ ] System prompts versionados y auditables
+- [ ] Consentimiento explícito + política de privacidad + términos de servicio
 
 ### Fase 4 — Calidad, Observabilidad y Costos (Semanas 7-8)
 
-- Testing completo:
-  - Unit tests (lógica de intents y reglas).
-  - Integration tests (API, DB, CRM, WhatsApp).
-  - E2E tests (conversación de punta a punta).
-  - Red-team tests (prompt injection, data leakage, abuse).
-- Observabilidad:
-  - Logs estructurados con correlation ID.
-  - Métricas clave: latencia p50/p95, error rate, tasa de handoff, costo por conversación.
-  - Alertas en tiempo real (caída de canal, errores 5xx, costo anómalo).
-- Optimización de costos:
-  - Routing dinámico de modelos (barato por defecto, potente solo cuando haga falta).
-  - Cache de respuestas frecuentes.
-  - Límites de tokens por conversación.
+- [ ] Test suite: unit (intents, booking), integration (API, DB, WhatsApp), E2E, red-team
+- [ ] Métricas clave: latencia p50/p95, error rate, tasa de handoff, costo por conversación
+- [ ] Alertas en tiempo real (caída de canal, errores 5xx, costo anómalo)
+- [ ] Routing dinámico de modelos (barato por defecto, potente cuando haga falta)
+- [ ] Cache de respuestas frecuentes + límites de tokens por conversación
 
 ### Fase 5 — Go-Live Controlado (Semanas 9-10)
 
-- Lanzamiento por etapas:
-  - Pilot interno.
-  - 1-2 clientes beta.
-  - Escalado progresivo.
-- Definir SLOs iniciales:
-  - Disponibilidad: `99.5%+`.
-  - Primer tiempo de respuesta: `< 4s` en web.
-  - Tasa de error de API: `< 1%`.
-- Definir runbooks operativos:
-  - Caída de proveedor LLM.
-  - Falla de canal WhatsApp.
-  - Incidente de seguridad.
-- Backups y recuperación:
-  - Backups diarios automáticos.
-  - Prueba mensual de restauración.
+- [ ] Lanzamiento por etapas: piloto interno → 1-2 clientes beta → escalado progresivo
+- [ ] SLOs: disponibilidad 99.5%+, primer tiempo de respuesta < 4s, tasa de error < 1%
+- [ ] Estrategia kept-warm para Vercel (cold starts)
+- [ ] Runbooks: caída de LLM, falla de WhatsApp, incidente de seguridad
+- [ ] Backups diarios automáticos + prueba mensual de restauración
 
 ### Arquitectura de Referencia (v1)
 
-1. Cliente envía mensaje (web o WhatsApp).
-2. API gateway valida autenticación, rate limit y formato.
-3. Orquestador decide: flujo determinístico, RAG o LLM directo.
-4. Guardrails validan respuesta antes de enviarla.
-5. Se registra conversación, métricas y eventos de auditoría.
-6. Si aplica, se crea tarea de handoff a agente humano.
+```
+WhatsApp → Meta Webhook → route.ts (verify + 200 fast)
+                              ↓
+                      orchestrator.ts
+                    ┌─────────┼─────────┐
+                    ↓         ↓         ↓
+              handleHandoff  handleBooking  handleLLMFlow
+              (notify owner) (booking.ts)   (claude.ts + tools)
+                    ↓         ↓         ↓
+              supabase.ts ← persist ← redis.ts (history + rate limit)
+                    ↓
+              whatsapp.ts → send reply
+```
 
 ### Checklist de Producción (Definition of Done)
 
+- [x] Webhook funcional con dedup + rate limiting
+- [x] Multi-tenancy con aislamiento por `phone_number_id`
+- [x] Circuit breaker + fallback para dependencias externas
+- [x] Logging estructurado con correlation IDs
 - [ ] Ambientes `dev/staging/prod` separados
 - [ ] CI/CD con tests bloqueando deploy
 - [ ] Autenticación, RBAC y MFA admin
 - [ ] Cifrado en tránsito/reposo + backups verificados
-- [ ] Rate limiting + WAF + validación de inputs
+- [ ] RLS + validación de inputs
 - [ ] Guardrails LLM + pruebas de prompt injection
 - [ ] Observabilidad (logs, métricas, alertas) activa
 - [ ] Runbooks y plan de incidentes documentados
