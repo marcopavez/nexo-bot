@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'crypto';
+import { env } from './env';
 
 const GRAPH_API_VERSION = 'v21.0';
 
@@ -8,7 +9,7 @@ export async function sendMessage(phoneNumberId: string, to: string, text: strin
   const res = await fetch(url, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${process.env.META_ACCESS_TOKEN}`,
+      Authorization: `Bearer ${env.META_ACCESS_TOKEN}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -26,10 +27,7 @@ export async function sendMessage(phoneNumberId: string, to: string, text: strin
 }
 
 export function verifySignature(rawBody: string, signature: string): boolean {
-  const appSecret = process.env.META_APP_SECRET;
-  if (!appSecret) return false;
-
-  const expected = `sha256=${createHmac('sha256', appSecret).update(rawBody).digest('hex')}`;
+  const expected = `sha256=${createHmac('sha256', env.META_APP_SECRET).update(rawBody).digest('hex')}`;
 
   try {
     return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));

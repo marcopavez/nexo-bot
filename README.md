@@ -150,3 +150,133 @@ supabase/
 | **Total** | **~$10–15** |
 
 Recommended client price: $80.000–150.000 CLP/month.
+
+## Roadmap — Chatbot de Producción (Funcional y Seguro)
+
+Objetivo: pasar de demo a un chatbot en producción para WhatsApp, con seguridad, trazabilidad, observabilidad y operación continua.
+
+### Fase 1 — Fundaciones Técnicas (Semanas 1-2)
+
+- Definir alcance v1 para WhatsApp exclusivamente:
+  - FAQ del negocio.
+  - Captura de leads.
+  - Agendamiento.
+  - Cotizaciones.
+  - Handoff a humano cuando la confianza de respuesta sea baja o la intención no coincida con la consulta.
+- Definir stack inicial enfocado en costo bajo y velocidad de ejecución:
+  - `Canal`: WhatsApp Cloud API oficial de Meta.
+  - `Backend`: Typescript y React.
+  - `LLM layer`: proveedor económico con buen costo por token. Recomendación inicial: OpenRouter para enrutar a modelos baratos y mantener flexibilidad de cambio.
+  - `Base de datos`: PostgreSQL.
+  - `Cache/colas`: postergar Redis en v1 si no es estrictamente necesario para no subir costos.
+  - `Infraestructura`: Railway o Render para backend; Supabase para PostgreSQL si el costo y límites calzan con la etapa inicial.
+- Definir estructura lógica del sistema:
+  - `Webhook de WhatsApp`: recibe mensajes entrantes desde Meta.
+  - `Orquestador`: clasifica intención y decide entre FAQ, lead, agenda, cotización o escalamiento.
+  - `Motor de reglas`: maneja validaciones, estados de conversación y reglas de negocio.
+  - `Servicio LLM`: responde consultas abiertas dentro de límites definidos.
+  - `Persistencia`: guarda conversaciones, leads, cotizaciones, auditoría y estado de sesión.
+- Definir política de datos desde el inicio:
+  - Datos permitidos: nombre completo, edad, correo electrónico, número telefónico y dirección.
+  - Datos prohibidos: RUT y cualquier otro dato sensible.
+  - Guardar solo lo necesario para operar, cotizar y dar seguimiento comercial.
+- Crear ambientes separados: `dev`, `staging`, `prod`.
+- Configurar CI/CD con deploy automático a `staging` y deploy protegido a `prod`.
+- Definir meta operativa de Fase 1:
+  - Tener esta semana un backend funcional en `staging` con webhook activo, flujo básico de FAQ, captura de lead, agendamiento simple y cotización inicial.
+
+### Fase 2 — Núcleo Funcional (Semanas 3-4)
+
+- Implementar flujo de conversación híbrido:
+  - Ruta 1: respuestas determinísticas (FAQs críticas y flujos de negocio).
+  - Ruta 2: respuestas con LLM para preguntas abiertas.
+  - Ruta 3: handoff a humano por reglas (intención de compra, reclamo, baja confianza).
+- Implementar memoria controlada:
+  - Contexto corto por sesión.
+  - Datos persistentes mínimos por cliente (empresa, rubro, historial relevante).
+- Implementar RAG (si aplica) con base de conocimiento del cliente:
+  - Políticas, catálogo, horarios, cobertura, precios.
+  - Versionado de documentos para trazabilidad.
+- Implementar panel mínimo operativo:
+  - Ver conversaciones.
+  - Etiquetar intents.
+  - Activar/desactivar flujos.
+
+### Fase 3 — Seguridad y Cumplimiento (Semanas 5-6)
+
+- Autenticación y autorización:
+  - JWT de corta duración.
+  - RBAC (admin, operador, solo lectura).
+  - MFA para cuentas administrativas.
+- Protección de datos:
+  - Cifrado en tránsito (TLS) y en reposo (DB y backups).
+  - Gestión de secretos en vault (no secretos en repo).
+  - Minimización y retención de datos por política.
+- Protección de aplicación:
+  - Rate limiting por IP, sesión y cliente.
+  - WAF + validación estricta de payloads.
+  - Sanitización de inputs contra prompt injection y contenido malicioso.
+- Seguridad LLM:
+  - System prompts versionados y auditables.
+  - Guardrails de salida (PII, toxicidad, respuestas fuera de política).
+  - Deny-list de herramientas y dominios no permitidos.
+- Cumplimiento y legal:
+  - Consentimiento explícito para uso de datos.
+  - Términos de servicio y política de privacidad públicas.
+  - Registro de auditoría para acciones sensibles.
+
+### Fase 4 — Calidad, Observabilidad y Costos (Semanas 7-8)
+
+- Testing completo:
+  - Unit tests (lógica de intents y reglas).
+  - Integration tests (API, DB, CRM, WhatsApp).
+  - E2E tests (conversación de punta a punta).
+  - Red-team tests (prompt injection, data leakage, abuse).
+- Observabilidad:
+  - Logs estructurados con correlation ID.
+  - Métricas clave: latencia p50/p95, error rate, tasa de handoff, costo por conversación.
+  - Alertas en tiempo real (caída de canal, errores 5xx, costo anómalo).
+- Optimización de costos:
+  - Routing dinámico de modelos (barato por defecto, potente solo cuando haga falta).
+  - Cache de respuestas frecuentes.
+  - Límites de tokens por conversación.
+
+### Fase 5 — Go-Live Controlado (Semanas 9-10)
+
+- Lanzamiento por etapas:
+  - Pilot interno.
+  - 1-2 clientes beta.
+  - Escalado progresivo.
+- Definir SLOs iniciales:
+  - Disponibilidad: `99.5%+`.
+  - Primer tiempo de respuesta: `< 4s` en web.
+  - Tasa de error de API: `< 1%`.
+- Definir runbooks operativos:
+  - Caída de proveedor LLM.
+  - Falla de canal WhatsApp.
+  - Incidente de seguridad.
+- Backups y recuperación:
+  - Backups diarios automáticos.
+  - Prueba mensual de restauración.
+
+### Arquitectura de Referencia (v1)
+
+1. Cliente envía mensaje (web o WhatsApp).
+2. API gateway valida autenticación, rate limit y formato.
+3. Orquestador decide: flujo determinístico, RAG o LLM directo.
+4. Guardrails validan respuesta antes de enviarla.
+5. Se registra conversación, métricas y eventos de auditoría.
+6. Si aplica, se crea tarea de handoff a agente humano.
+
+### Checklist de Producción (Definition of Done)
+
+- [ ] Ambientes `dev/staging/prod` separados
+- [ ] CI/CD con tests bloqueando deploy
+- [ ] Autenticación, RBAC y MFA admin
+- [ ] Cifrado en tránsito/reposo + backups verificados
+- [ ] Rate limiting + WAF + validación de inputs
+- [ ] Guardrails LLM + pruebas de prompt injection
+- [ ] Observabilidad (logs, métricas, alertas) activa
+- [ ] Runbooks y plan de incidentes documentados
+- [ ] Política de privacidad + términos publicados
+- [ ] SLOs medidos por al menos 2 semanas en producción

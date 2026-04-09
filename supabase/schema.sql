@@ -25,8 +25,55 @@ CREATE TABLE leads (
   created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE conversations (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  bot_id           UUID NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  user_phone       TEXT NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+  current_intent   TEXT CHECK (current_intent IN ('faq', 'lead', 'booking', 'quote', 'handoff')),
+  last_message_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at       TIMESTAMPTZ DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (bot_id, user_phone)
+);
+
+CREATE TABLE messages (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id      UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  whatsapp_message_id  TEXT,
+  direction            TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
+  role                 TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+  intent               TEXT CHECK (intent IN ('faq', 'lead', 'booking', 'quote', 'handoff')),
+  content              TEXT NOT NULL,
+  metadata             JSONB,
+  created_at           TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE booking_requests (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id      UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  bot_id               UUID NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  user_phone           TEXT NOT NULL,
+  customer_name        TEXT,
+  requested_service    TEXT,
+  requested_date_text  TEXT,
+  requested_time_text  TEXT,
+  notes                TEXT,
+  status               TEXT NOT NULL DEFAULT 'collecting' CHECK (
+    status IN ('collecting', 'pending_confirmation', 'confirmed', 'cancelled', 'handoff')
+  ),
+  created_at           TIMESTAMPTZ DEFAULT NOW(),
+  updated_at           TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Index for quick lead lookups per bot
 CREATE INDEX leads_bot_id_idx ON leads(bot_id);
+CREATE INDEX conversations_bot_id_idx ON conversations(bot_id);
+CREATE INDEX messages_conversation_id_idx ON messages(conversation_id);
+CREATE INDEX booking_requests_bot_id_idx ON booking_requests(bot_id);
+CREATE UNIQUE INDEX booking_requests_active_conversation_idx
+ON booking_requests(conversation_id)
+WHERE status IN ('collecting', 'pending_confirmation');
 
 -- ============================================================
 -- Demo bot: Clínica Dental (replace phone_number_id before use)
