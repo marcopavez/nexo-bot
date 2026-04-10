@@ -13,11 +13,16 @@ export default function ConversationPage() {
   const [labelIntent, setLabelIntent] = useState<Intent>('faq');
   const [labeling, setLabeling] = useState(false);
   const [labelDone, setLabelDone] = useState(false);
+  const [status, setStatus] = useState<'open' | 'closed'>('open');
+  const [togglingStatus, setTogglingStatus] = useState(false);
 
   useEffect(() => {
     fetch(`/api/admin/bots/${botId}/conversations/${conversationId}/messages`)
       .then((r) => r.json())
-      .then((d) => setMessages(d.messages ?? []))
+      .then((d) => {
+        setMessages(d.messages ?? []);
+        if (d.status) setStatus(d.status);
+      })
       .finally(() => setLoading(false));
   }, [botId, conversationId]);
 
@@ -32,9 +37,34 @@ export default function ConversationPage() {
     setLabelDone(true);
   }
 
+  async function handleToggleStatus() {
+    const next = status === 'open' ? 'closed' : 'open';
+    setTogglingStatus(true);
+    await fetch(`/api/admin/bots/${botId}/conversations/${conversationId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: next }),
+    });
+    setStatus(next);
+    setTogglingStatus(false);
+  }
+
   return (
     <div>
-      <h1 className="text-xl font-semibold mb-4">Hilo de mensajes</h1>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-xl font-semibold">Hilo de mensajes</h1>
+        <button
+          onClick={handleToggleStatus}
+          disabled={togglingStatus}
+          className={`px-3 py-1 text-sm rounded disabled:opacity-50 ${
+            status === 'open'
+              ? 'bg-green-100 text-green-700 hover:bg-green-200'
+              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+          }`}
+        >
+          {togglingStatus ? '…' : status === 'open' ? 'Marcar cerrada' : 'Reabrir'}
+        </button>
+      </div>
 
       <div className="flex items-center gap-2 mb-6">
         <select

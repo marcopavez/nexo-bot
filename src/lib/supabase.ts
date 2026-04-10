@@ -309,6 +309,18 @@ export async function labelConversationIntent(
   if (error) throw new Error(`Failed to label conversation intent: ${error.message}`);
 }
 
+export async function updateConversationStatus(
+  conversationId: string,
+  status: 'open' | 'closed'
+): Promise<void> {
+  const { error } = await getSupabaseClient()
+    .from('conversations')
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq('id', conversationId);
+
+  if (error) throw new Error(`Failed to update conversation status: ${error.message}`);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2 — Knowledge base
 // ---------------------------------------------------------------------------
