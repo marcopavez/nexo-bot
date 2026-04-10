@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { listBotMemory, upsertBotMemory } from '@/lib/supabase';
+import { invalidateBotMemoryCache } from '@/lib/redis';
 
 export async function GET(
   _request: Request,
@@ -37,6 +38,7 @@ export async function POST(
     }
 
     const memory = await upsertBotMemory({ botId, key, value, source });
+    await invalidateBotMemoryCache(botId).catch(() => {});
     return NextResponse.json({ memory }, { status: 201 });
   } catch (err) {
     return NextResponse.json(
