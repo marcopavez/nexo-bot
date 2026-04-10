@@ -16,16 +16,21 @@ function LoginForm() {
     setLoading(true);
     setError('');
 
-    const res = await fetch('/api/admin/auth', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ secret }),
-    });
+    try {
+      const res = await fetch('/api/admin/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret }),
+      });
 
-    if (res.ok) {
-      router.push(redirect);
-    } else {
-      setError('Credenciales incorrectas');
+      if (res.ok) {
+        router.push(redirect);
+      } else {
+        setError('Credenciales incorrectas');
+      }
+    } catch {
+      setError('Error de conexión. Intenta de nuevo.');
+    } finally {
       setLoading(false);
     }
   }

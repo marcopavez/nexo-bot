@@ -6,7 +6,7 @@ import { NextRequest, NextResponse } from 'next/server';
  * The raw secret never leaves the server — the cookie holds only this HMAC digest.
  * Rotating ADMIN_SECRET automatically invalidates all sessions.
  */
-export function computeSessionToken(secret: string): string {
+function computeSessionToken(secret: string): string {
   return createHmac('sha256', secret).update('nexo-admin-session-v1').digest('hex');
 }
 
