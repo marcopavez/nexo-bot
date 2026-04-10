@@ -64,30 +64,30 @@ Nexo Bot is a **multi-tenant WhatsApp chatbot platform** for Chilean small and m
 
 ```mermaid
 graph TB
-    subgraph Customer["Customer (WhatsApp)"]
+    subgraph Customer["Customer"]
         WA[WhatsApp App]
     end
 
     subgraph Meta["Meta Platform"]
-        WABA[WhatsApp Business API\nGraph API v21.0]
+        WABA["WhatsApp Business API (Graph API v21.0)"]
     end
 
     subgraph Vercel["Vercel — Nexo Bot"]
-        MW[Next.js Middleware\nAdmin Auth]
-        WH[/api/whatsapp\nWebhook Handler]
-        ADMIN[/api/admin/**\nAdmin REST API]
-        ORCH[Orchestrator\nMessage Pipeline]
-        UI[Admin Panel\nNext.js SSR Pages]
+        MW["Middleware (Admin Auth)"]
+        WH["Webhook Handler (api/whatsapp)"]
+        ADMIN["Admin REST API (api/admin)"]
+        ORCH["Orchestrator — Message Pipeline"]
+        UI["Admin Panel — Next.js SSR"]
     end
 
     subgraph External["External Services"]
-        GEMINI[Google Gemini\n2.5 Flash]
-        OPENAI[OpenAI\ntext-embedding-3-small]
+        GEMINI["Google Gemini 2.5 Flash"]
+        OPENAI["OpenAI text-embedding-3-small"]
     end
 
     subgraph Data["Data Layer"]
-        SUPA[Supabase\nPostgreSQL + pgvector]
-        REDIS[Upstash Redis\nCache + Locks + State]
+        SUPA["Supabase — PostgreSQL + pgvector"]
+        REDIS["Upstash Redis — Cache + Locks"]
     end
 
     WA -- "Send message" --> WABA
@@ -95,13 +95,13 @@ graph TB
     WH -- "after()" --> ORCH
     ORCH -- "Chat / Classify" --> GEMINI
     ORCH -- "Embed query" --> OPENAI
-    ORCH -- "Read/write" --> SUPA
-    ORCH -- "Cache / Lock / Rate" --> REDIS
+    ORCH -- "Read / Write" --> SUPA
+    ORCH -- "Cache / Lock / Rate limit" --> REDIS
     ORCH -- "Send reply" --> WABA
     WABA -- "Deliver reply" --> WA
 
     UI --> ADMIN
-    MW -- "Guard /admin/*" --> ADMIN
+    MW -- "Guard admin routes" --> ADMIN
     ADMIN --> SUPA
     ADMIN -- "Invalidate cache" --> REDIS
 ```
