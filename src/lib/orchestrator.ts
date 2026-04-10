@@ -1,12 +1,19 @@
 import { runBookingFlow } from '@/lib/booking';
-import { chat, classifyIntent } from '@/lib/claude';
+import { chat, classifyIntent } from '@/lib/gemini';
 import { detectIntent } from '@/lib/intents';
 import { logEvent } from '@/lib/logger';
 import { buildSystemPrompt } from '@/lib/prompts';
+import { retrieveContext } from '@/lib/rag';
 import {
+  acquireMessageLock,
   checkRateLimit,
   clearProviderFailures,
+  getCachedBot,
+  getCachedBotMemory,
+  setCachedBot,
+  setCachedBotMemory,
   getHistory,
+  isMessageProcessed,
   isProviderDegraded,
   markMessageAsProcessed,
   recordProviderFailure,
@@ -16,11 +23,14 @@ import {
   getActiveBookingRequest,
   getBotByPhoneNumberId,
   getOrCreateConversation,
+  getMemories,
+  formatMemoryContext,
   saveLead,
   saveConversationMessage,
   updateConversationIntent,
   upsertBookingRequest,
 } from '@/lib/supabase';
+import { getOptionalEnv } from '@/lib/env';
 import { sendMessage } from '@/lib/whatsapp';
 import type {
   BookingRequest,
@@ -62,6 +72,33 @@ function buildIntentInstructions(intent: Intent): string {
     default:
       return '';
   }
+}
+
+function buildBookingSystemPrompt(bot: Bot, state: {
+  customer_name: string | null;
+  requested_service: string | null;
+  requested_date_text: string | null;
+  requested_time_text: string | null;
+  missingFields: string[];
+}): string {
+  const serviceList = bot.services?.map((s) => s.nombre).join(', ') ?? 'consultar directamente';
+  const lines = [
+    buildSystemPrompt(bot),
+    'FLUJO ACTIVO: AGENDAMIENTO.',
+    'Estado actual del agendamiento:',
+    `- Nombre: ${state.customer_name ?? 'pendiente'}`,
+    `- Servicio: ${state.requested_service ?? 'pendiente'} (disponibles: ${serviceList})`,
+    `- Fecha: ${state.requested_date_text ?? 'pendiente'}`,
+    `- Hora: ${state.requested_time_text ?? 'pendiente'}`,
+  ];
+
+  if (state.missingFields.length > 0) {
+    lines.push(`Dato faltante a solicitar ahora: ${state.missingFields[0]}`);
+    lines.push('Haz UNA sola pregunta para obtener ese dato. Sé breve, cálido y en español chileno.');
+  } else {
+    lines.push('Todos los datos están completos. Confirma el agendamiento de forma amigable (2 oraciones máx).');
+  }
+  return lines.join('\n');
 }
 
 function buildHandoffReply(businessName: string): string {
@@ -132,6 +169,40 @@ async function handleBooking(
 
   const bookingFlow = runBookingFlow({ bot, existingBooking: activeBooking, userText });
 
+  // Compute missing fields to give the LLM context about what to ask next.
+  const updates = bookingFlow.updates;
+  const missingFields: string[] = [];
+  if (!updates.customer_name) missingFields.push('nombre del cliente');
+  if (!updates.requested_service) missingFields.push('servicio requerido');
+  if (!updates.requested_date_text) missingFields.push('fecha deseada');
+  if (!updates.requested_time_text) missingFields.push('hora deseada');
+
+  // Use Claude to generate a natural reply; fall back to the template on error.
+  let reply = bookingFlow.reply;
+  const degraded = await isProviderDegraded('gemini');
+  if (!degraded) {
+    try {
+      const bookingSystemPrompt = buildBookingSystemPrompt(bot, {
+        customer_name: updates.customer_name ?? null,
+        requested_service: updates.requested_service ?? null,
+        requested_date_text: updates.requested_date_text ?? null,
+        requested_time_text: updates.requested_time_text ?? null,
+        missingFields,
+      });
+      const result = await chat(bookingSystemPrompt, history);
+      if (result.text) {
+        reply = result.text;
+        await clearProviderFailures('gemini');
+      }
+    } catch (err) {
+      await recordProviderFailure('gemini');
+      logEvent('warn', 'Gemini unavailable for booking reply — using template fallback', {
+        correlationId, messageId, phoneNumberId, userPhone,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   const bookingRequest = await upsertBookingRequest({
     existingBookingId: activeBooking?.id,
     conversationId: conversation.id,
@@ -145,20 +216,20 @@ async function handleBooking(
     status: bookingFlow.updates.status ?? 'collecting',
   });
 
-  history.push({ role: 'assistant', content: bookingFlow.reply });
+  history.push({ role: 'assistant', content: reply });
   await saveHistory(phoneNumberId, userPhone, history);
   await saveConversationMessage({
     conversationId: conversation.id,
     direction: 'outbound',
     role: 'assistant',
     intent: effectiveIntent,
-    content: bookingFlow.reply,
+    content: reply,
     metadata: {
       bookingRequestId: bookingRequest.id,
       bookingStatus: bookingRequest.status,
     },
   });
-  await sendMessage(phoneNumberId, userPhone, bookingFlow.reply);
+  await sendMessage(phoneNumberId, userPhone, reply);
 
   if (bookingFlow.shouldNotifyOwner && bot.owner_whatsapp) {
     const notification =
@@ -198,9 +269,9 @@ async function handleLLMFlow(
 ): Promise<void> {
   const { bot, conversation, phoneNumberId, userPhone, correlationId, messageId, effectiveIntent, detection } = ctx;
 
-  const degraded = await isProviderDegraded('anthropic');
+  const degraded = await isProviderDegraded('gemini');
   if (degraded) {
-    logEvent('warn', 'Circuit breaker open — skipping Claude API call', {
+    logEvent('warn', 'Circuit breaker open — skipping Gemini API call', {
       correlationId, messageId, phoneNumberId, userPhone,
       botId: bot.id,
     });
@@ -209,8 +280,26 @@ async function handleLLMFlow(
   }
 
   try {
+    // Inject RAG context and bot memory when available
+    const ragEnabled = !!getOptionalEnv('OPENAI_API_KEY');
+    const [ragContext, memories] = await Promise.all([
+      ragEnabled
+        ? retrieveContext(bot.id, ctx.userText).catch(() => '')
+        : Promise.resolve(''),
+      (async () => {
+        const cached = await getCachedBotMemory(bot.id).catch(() => null);
+        if (cached) return cached;
+        const fresh = await getMemories(bot.id).catch(() => []);
+        await setCachedBotMemory(bot.id, fresh).catch(() => {});
+        return fresh;
+      })(),
+    ]);
+    const memoryContext = formatMemoryContext(memories);
+
     const systemPrompt = [
       buildSystemPrompt(bot),
+      ragContext ? `CONTEXTO DE BASE DE CONOCIMIENTO:\n${ragContext}` : '',
+      memoryContext,
       `INTENCION DETECTADA: ${effectiveIntent}`,
       `CONFIANZA DE CLASIFICACION: ${detection.confidence}`,
       `MOTIVO DE CLASIFICACION: ${detection.reason}`,
@@ -220,7 +309,7 @@ async function handleLLMFlow(
       .join('\n\n');
 
     const result = await chat(systemPrompt, history);
-    await clearProviderFailures('anthropic');
+    await clearProviderFailures('gemini');
 
     if (result.leadCapture) {
       const { nombre, motivo } = result.leadCapture;
@@ -263,8 +352,8 @@ async function handleLLMFlow(
       intent: effectiveIntent,
     });
   } catch (err) {
-    const failCount = await recordProviderFailure('anthropic');
-    logEvent('error', 'Claude API call failed, sending fallback reply', {
+    const failCount = await recordProviderFailure('gemini');
+    logEvent('error', 'Gemini API call failed, sending fallback reply', {
       correlationId, messageId, phoneNumberId, userPhone,
       botId: bot.id, conversationId: conversation.id,
       error: err instanceof Error ? err.message : String(err),
@@ -278,6 +367,8 @@ async function handleLLMFlow(
 // Entry point
 // ---------------------------------------------------------------------------
 
+const MAX_USER_TEXT_LENGTH = 2000;
+
 export async function processIncomingMessage(params: {
   correlationId: string;
   phoneNumberId: string;
@@ -285,10 +376,22 @@ export async function processIncomingMessage(params: {
   userText: string;
   messageId: string;
 }): Promise<void> {
-  const { correlationId, phoneNumberId, userPhone, userText, messageId } = params;
+  const { correlationId, phoneNumberId, userPhone, messageId } = params;
+  // Hard-truncate user input to prevent token exhaustion and DB bloat.
+  const userText = params.userText.slice(0, MAX_USER_TEXT_LENGTH);
 
-  const accepted = await markMessageAsProcessed(phoneNumberId, messageId);
-  if (!accepted) {
+  // Step 1: Acquire a short-lived processing lock (30s) to guard against concurrent
+  // duplicate deliveries from Meta. This is separate from the permanent dedup key.
+  const lockAcquired = await acquireMessageLock(phoneNumberId, messageId);
+  if (!lockAcquired) {
+    logEvent('info', 'Message processing lock held by another worker — skipping', {
+      correlationId, messageId, phoneNumberId, userPhone,
+    });
+    return;
+  }
+
+  // Step 2: Check if already permanently processed (successful previous run).
+  if (await isMessageProcessed(phoneNumberId, messageId)) {
     logEvent('info', 'Duplicate WhatsApp message ignored', {
       correlationId, messageId, phoneNumberId, userPhone,
     });
@@ -301,10 +404,17 @@ export async function processIncomingMessage(params: {
       correlationId, messageId, phoneNumberId, userPhone,
     });
     await sendMessage(phoneNumberId, userPhone, RATE_LIMIT_REPLY);
+    // Mark processed so rate-limited messages aren't retried endlessly.
+    await markMessageAsProcessed(phoneNumberId, messageId);
     return;
   }
 
-  const bot = await getBotByPhoneNumberId(phoneNumberId);
+  // Bot config — served from Redis cache (60s TTL) to avoid a DB hit per message.
+  let bot = await getCachedBot(phoneNumberId).catch(() => null);
+  if (!bot) {
+    bot = await getBotByPhoneNumberId(phoneNumberId);
+    if (bot) await setCachedBot(phoneNumberId, bot).catch(() => {});
+  }
   if (!bot) {
     logEvent('warn', 'No bot configured for incoming phone_number_id', {
       correlationId, messageId, phoneNumberId, userPhone,
@@ -346,6 +456,26 @@ export async function processIncomingMessage(params: {
     intent: effectiveIntent, confidence: detection.confidence,
   });
 
+  // Check if the effective intent is enabled for this bot
+  const flowEnabled = bot.enabled_flows?.[effectiveIntent] !== false;
+  if (!flowEnabled) {
+    const disabledReply = 'Este servicio no está disponible en este momento.';
+    await sendMessage(phoneNumberId, userPhone, disabledReply);
+    await saveConversationMessage({
+      conversationId: conversation.id,
+      direction: 'outbound',
+      role: 'system',
+      intent: effectiveIntent,
+      content: disabledReply,
+      metadata: { flowDisabled: true },
+    });
+    logEvent('info', 'Flow disabled — skipped', {
+      correlationId, messageId, phoneNumberId, userPhone,
+      botId: bot.id, conversationId: conversation.id, intent: effectiveIntent,
+    });
+    return;
+  }
+
   const ctx: MessageContext = {
     correlationId, phoneNumberId, userPhone, userText, messageId,
     bot, conversation, detection, effectiveIntent,
@@ -353,6 +483,7 @@ export async function processIncomingMessage(params: {
 
   if (effectiveIntent === 'handoff') {
     await handleHandoff(ctx);
+    await markMessageAsProcessed(phoneNumberId, messageId);
     return;
   }
 
@@ -361,8 +492,12 @@ export async function processIncomingMessage(params: {
 
   if (effectiveIntent === 'booking') {
     await handleBooking(ctx, activeBooking, history);
+    await markMessageAsProcessed(phoneNumberId, messageId);
     return;
   }
 
   await handleLLMFlow(ctx, history);
+  // Mark permanently processed only after full successful completion so that
+  // failures (LLM down, DB error, etc.) allow Meta's webhook retry to re-run.
+  await markMessageAsProcessed(phoneNumberId, messageId);
 }

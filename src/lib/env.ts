@@ -1,5 +1,5 @@
 const REQUIRED_ENV_VARS = [
-  'ANTHROPIC_API_KEY',
+  'GEMINI_API_KEY',
   'META_ACCESS_TOKEN',
   'META_APP_SECRET',
   'WEBHOOK_VERIFY_TOKEN',
@@ -31,3 +31,7 @@ export const env = new Proxy({} as EnvShape, {
     return readRequiredEnv(prop as RequiredEnvVar);
   },
 });
+
+export function getOptionalEnv(name: string): string | undefined {
+  return process.env[name] || undefined;
+}
