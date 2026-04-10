@@ -8,6 +8,7 @@ export interface Bot {
   address: string | null;
   owner_whatsapp: string | null;
   system_prompt: string | null;
+  enabled_flows: Record<string, boolean>;
 }
 
 export interface ChatMessage {
@@ -24,6 +25,18 @@ export interface Conversation {
   last_message_at: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface Message {
+  id: string;
+  conversation_id: string;
+  whatsapp_message_id: string | null;
+  direction: 'inbound' | 'outbound';
+  role: 'user' | 'assistant' | 'system';
+  intent: Intent | null;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
 }
 
 export interface BookingRequest {
@@ -64,4 +77,43 @@ export interface ChatResult {
   leadCapture: LeadCapture | null;
   inputTokens: number;
   outputTokens: number;
+}
+
+export interface KnowledgeBaseDocument {
+  id: string;
+  bot_id: string;
+  title: string;
+  content: string;
+  is_active: boolean;
+  indexing_status: 'pending' | 'indexed' | 'failed';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentVersion {
+  id: string;
+  document_id: string;
+  version: number;
+  title: string;
+  content: string;
+  created_at: string;
+}
+
+export interface DocumentChunk {
+  id: string;
+  document_id: string;
+  bot_id: string;
+  chunk_index: number;
+  content: string;
+  created_at: string;
+}
+
+export interface BotMemory {
+  id: string;
+  bot_id: string;
+  key: string;
+  value: string;
+  source: 'manual' | 'conversation';
+  created_at: string;
+  updated_at: string;
 }

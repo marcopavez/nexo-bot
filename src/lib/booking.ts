@@ -63,8 +63,23 @@ function mergeField<T>(
 }
 
 function extractName(text: string): string | null {
-  const match = text.match(/\b(?:me llamo|soy|mi nombre es)\s+([a-záéíóúñ]+(?:\s+[a-záéíóúñ]+){0,2})/i);
-  return match?.[1]?.trim() ?? null;
+  // Formal introductions: "me llamo X", "soy X", "mi nombre es X"
+  const formalMatch = text.match(
+    /\b(?:me llamo|mi nombre es|mi nombre:|nombre:)\s+([a-záéíóúüñ]+(?:\s+[a-záéíóúüñ]+){0,2})/i
+  );
+  if (formalMatch) return formalMatch[1].trim();
+
+  // "soy X" — common but also used in "soy de..." so require a proper name (capitalized or short)
+  const soyMatch = text.match(/\bsoy\s+([A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]+)?)\b/);
+  if (soyMatch) return soyMatch[1].trim();
+
+  // Standalone name at start/end of short message: "Hola! Claudia González"
+  const standaloneMatch = text.match(
+    /^(?:hola[,!.]?\s+)?([A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]+){0,2})[,!.]?\s*$/
+  );
+  if (standaloneMatch) return standaloneMatch[1].trim();
+
+  return null;
 }
 
 function extractDateText(text: string): string | null {
@@ -82,11 +97,17 @@ function extractTimeText(text: string): string | null {
 
 function extractRequestedService(text: string, bot: Bot): string | null {
   const normalized = normalizeText(text);
-  const service = bot.services?.find((item) =>
-    normalized.includes(item.nombre.toLowerCase())
-  );
 
-  return service?.nombre ?? null;
+  // Exact substring match (case-insensitive)
+  const exact = bot.services?.find((item) => normalized.includes(item.nombre.toLowerCase()));
+  if (exact) return exact.nombre;
+
+  // Fuzzy: any significant word (>3 chars) from the service name appears in the message
+  const fuzzy = bot.services?.find((item) => {
+    const words = item.nombre.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+    return words.length > 0 && words.some((w) => normalized.includes(w));
+  });
+  return fuzzy?.nombre ?? null;
 }
 
 export function extractBookingDetails(text: string, bot: Bot): BookingDetails {

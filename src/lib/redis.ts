@@ -1,11 +1,12 @@
 import { Redis } from '@upstash/redis';
+import { createHash } from 'crypto';
 import { env } from './env';
-import type { ChatMessage } from './types';
+import type { Bot, BotMemory, ChatMessage } from './types';
 
 let redis: Redis | null = null;
 
 const SESSION_TTL_SECONDS = 60 * 60 * 24; // 24 hours
-const MAX_HISTORY = 20; // keep last 20 messages to stay within token limits
+const MAX_HISTORY = 20;
 const MESSAGE_DEDUPE_TTL_SECONDS = 60 * 60 * 48; // 48 hours
 
 const RATE_LIMIT_WINDOW_SECONDS = 60;
@@ -13,6 +14,11 @@ const RATE_LIMIT_MAX_MESSAGES = 10;
 
 const CIRCUIT_BREAKER_TTL_SECONDS = 60;
 const CIRCUIT_BREAKER_THRESHOLD = 3;
+
+const BOT_MEMORY_CACHE_TTL = 120; // 2 minutes
+const EMBEDDING_CACHE_TTL = 600;  // 10 minutes
+const BOT_CONFIG_CACHE_TTL = 60;  // 1 minute
+const MESSAGE_LOCK_TTL_SECONDS = 30; // processing lock expires if worker crashes
 
 function key(phoneNumberId: string, userPhone: string): string {
   return `conv:${phoneNumberId}:${userPhone}`;
@@ -28,6 +34,23 @@ function rateLimitKey(phoneNumberId: string, userPhone: string): string {
 
 function circuitBreakerKey(provider: string): string {
   return `cb:fail:${provider}`;
+}
+
+function botMemoryKey(botId: string): string {
+  return `botmem:${botId}`;
+}
+
+function embeddingKey(botId: string, query: string): string {
+  const hash = createHash('sha256').update(query).digest('hex').slice(0, 16);
+  return `emb:${botId}:${hash}`;
+}
+
+function botConfigKey(phoneNumberId: string): string {
+  return `botcfg:${phoneNumberId}`;
+}
+
+function messageLockKey(phoneNumberId: string, messageId: string): string {
+  return `lock:msg:${phoneNumberId}:${messageId}`;
 }
 
 function getRedisClient(): Redis {
@@ -55,16 +78,44 @@ export async function saveHistory(
   await getRedisClient().setex(key(phoneNumberId, userPhone), SESSION_TTL_SECONDS, trimmed);
 }
 
-export async function markMessageAsProcessed(
+/**
+ * Acquire a short-lived processing lock (30s) to prevent concurrent duplicate processing.
+ * Returns true if this worker won the lock, false if another worker is already processing.
+ */
+export async function acquireMessageLock(
   phoneNumberId: string,
   messageId: string
 ): Promise<boolean> {
-  const result = await getRedisClient().set(messageKey(phoneNumberId, messageId), '1', {
-    nx: true,
+  const result = await getRedisClient().set(
+    messageLockKey(phoneNumberId, messageId),
+    '1',
+    { nx: true, ex: MESSAGE_LOCK_TTL_SECONDS }
+  );
+  return result === 'OK';
+}
+
+/**
+ * Check if a message has already been permanently processed (48h dedup window).
+ */
+export async function isMessageProcessed(
+  phoneNumberId: string,
+  messageId: string
+): Promise<boolean> {
+  const val = await getRedisClient().get(messageKey(phoneNumberId, messageId));
+  return val !== null;
+}
+
+/**
+ * Permanently mark a message as processed. Call only after successful completion
+ * so that failed processing can be retried when Meta resends the webhook.
+ */
+export async function markMessageAsProcessed(
+  phoneNumberId: string,
+  messageId: string
+): Promise<void> {
+  await getRedisClient().set(messageKey(phoneNumberId, messageId), '1', {
     ex: MESSAGE_DEDUPE_TTL_SECONDS,
   });
-
-  return result === 'OK';
 }
 
 // ---------------------------------------------------------------------------
@@ -76,11 +127,15 @@ export async function checkRateLimit(
   userPhone: string
 ): Promise<boolean> {
   const k = rateLimitKey(phoneNumberId, userPhone);
-  const client = getRedisClient();
-  const count = await client.incr(k);
-  if (count === 1) {
-    await client.expire(k, RATE_LIMIT_WINDOW_SECONDS);
-  }
+  // Atomic Lua: INCR + EXPIRE in a single round-trip. Without this, a crash between
+  // the two commands leaves a key with no TTL — permanently locking out the user.
+  const count = await getRedisClient().eval(
+    `local c = redis.call('INCR', KEYS[1])
+     if tonumber(c) == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+     return c`,
+    [k],
+    [String(RATE_LIMIT_WINDOW_SECONDS)]
+  ) as number;
   return count <= RATE_LIMIT_MAX_MESSAGES;
 }
 
@@ -90,11 +145,13 @@ export async function checkRateLimit(
 
 export async function recordProviderFailure(provider: string): Promise<number> {
   const k = circuitBreakerKey(provider);
-  const client = getRedisClient();
-  const count = await client.incr(k);
-  if (count === 1) {
-    await client.expire(k, CIRCUIT_BREAKER_TTL_SECONDS);
-  }
+  const count = await getRedisClient().eval(
+    `local c = redis.call('INCR', KEYS[1])
+     if tonumber(c) == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+     return c`,
+    [k],
+    [String(CIRCUIT_BREAKER_TTL_SECONDS)]
+  ) as number;
   return count;
 }
 
@@ -105,4 +162,48 @@ export async function isProviderDegraded(provider: string): Promise<boolean> {
 
 export async function clearProviderFailures(provider: string): Promise<void> {
   await getRedisClient().del(circuitBreakerKey(provider));
+}
+
+// ---------------------------------------------------------------------------
+// Bot memory cache (TTL: 2 min) — invalidated on every write/delete
+// ---------------------------------------------------------------------------
+
+export async function getCachedBotMemory(botId: string): Promise<BotMemory[] | null> {
+  return getRedisClient().get<BotMemory[]>(botMemoryKey(botId));
+}
+
+export async function setCachedBotMemory(botId: string, memories: BotMemory[]): Promise<void> {
+  await getRedisClient().setex(botMemoryKey(botId), BOT_MEMORY_CACHE_TTL, memories);
+}
+
+export async function invalidateBotMemoryCache(botId: string): Promise<void> {
+  await getRedisClient().del(botMemoryKey(botId));
+}
+
+// ---------------------------------------------------------------------------
+// Embedding cache (TTL: 10 min) — embeddings are deterministic per query
+// ---------------------------------------------------------------------------
+
+export async function getCachedEmbedding(botId: string, query: string): Promise<number[] | null> {
+  return getRedisClient().get<number[]>(embeddingKey(botId, query));
+}
+
+export async function setCachedEmbedding(
+  botId: string,
+  query: string,
+  embedding: number[]
+): Promise<void> {
+  await getRedisClient().setex(embeddingKey(botId, query), EMBEDDING_CACHE_TTL, embedding);
+}
+
+// ---------------------------------------------------------------------------
+// Bot config cache (TTL: 1 min) — avoids a DB hit on every inbound message
+// ---------------------------------------------------------------------------
+
+export async function getCachedBot(phoneNumberId: string): Promise<Bot | null> {
+  return getRedisClient().get<Bot>(botConfigKey(phoneNumberId));
+}
+
+export async function setCachedBot(phoneNumberId: string, bot: Bot): Promise<void> {
+  await getRedisClient().setex(botConfigKey(phoneNumberId), BOT_CONFIG_CACHE_TTL, bot);
 }

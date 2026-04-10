@@ -21,7 +21,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
 // POST — receive WhatsApp messages
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  // Always respond 200 quickly — Meta retries if it doesn't get 200 within 20s
   const correlationId = randomUUID();
   const rawBody = await req.text();
   const signature = req.headers.get('x-hub-signature-256') ?? '';
@@ -44,14 +43,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const { phoneNumberId, userPhone, text } = incoming;
   const { messageId } = incoming;
 
-  // Process asynchronously so we can return 200 immediately
-  processIncomingMessage({
-    correlationId,
-    phoneNumberId,
-    userPhone,
-    userText: text,
-    messageId,
-  }).catch((err) => {
+  // Await processing — fire-and-forget is unsafe on serverless (function teardown kills detached promises).
+  // Meta retries webhooks that don't get 200 within 20s; if we exceed that we'll deduplicate on retry.
+  try {
+    await processIncomingMessage({
+      correlationId,
+      phoneNumberId,
+      userPhone,
+      userText: text,
+      messageId,
+    });
+  } catch (err) {
     logEvent('error', 'Unhandled error while processing WhatsApp message', {
       correlationId,
       messageId,
@@ -59,7 +61,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       userPhone,
       error: err instanceof Error ? err.message : String(err),
     });
-  });
+  }
 
   return NextResponse.json({ status: 'ok' });
 }
