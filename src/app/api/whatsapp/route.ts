@@ -1,9 +1,14 @@
 import { randomUUID } from 'crypto';
+import { after } from 'next/server';
 import { NextRequest, NextResponse } from 'next/server';
-import { env } from '@/lib/env';
+import { env, validateEnv } from '@/lib/env';
 import { logEvent } from '@/lib/logger';
 import { processIncomingMessage } from '@/lib/orchestrator';
 import { verifySignature, parseWebhookPayload } from '@/lib/whatsapp';
+
+// Validate all required env vars at cold-start so a missing secret fails on the
+// first request to this route, not buried inside message processing logic.
+validateEnv();
 
 // GET — Meta webhook verification handshake
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -23,6 +28,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const correlationId = randomUUID();
   const rawBody = await req.text();
+
+  // Guard against unexpectedly large bodies before doing any HMAC work.
+  // Legitimate Meta webhook payloads are well under 64 KB.
+  if (rawBody.length > 65_536) {
+    return new NextResponse('Payload Too Large', { status: 413 });
+  }
+
   const signature = req.headers.get('x-hub-signature-256') ?? '';
 
   if (!verifySignature(rawBody, signature)) {
@@ -43,25 +55,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const { phoneNumberId, userPhone, text } = incoming;
   const { messageId } = incoming;
 
-  // Await processing — fire-and-forget is unsafe on serverless (function teardown kills detached promises).
-  // Meta retries webhooks that don't get 200 within 20s; if we exceed that we'll deduplicate on retry.
-  try {
-    await processIncomingMessage({
-      correlationId,
-      phoneNumberId,
-      userPhone,
-      userText: text,
-      messageId,
-    });
-  } catch (err) {
-    logEvent('error', 'Unhandled error while processing WhatsApp message', {
-      correlationId,
-      messageId,
-      phoneNumberId,
-      userPhone,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  // Schedule processing after the response is sent. This decouples Meta's 20s response
+  // SLA from AI processing time (up to ~20s), preventing retry storms when the AI is slow.
+  // `after` keeps the Vercel function alive until the work completes (no detached promises).
+  after(
+    processIncomingMessage({ correlationId, phoneNumberId, userPhone, userText: text, messageId })
+      .catch((err) => {
+        logEvent('error', 'Unhandled error while processing WhatsApp message', {
+          correlationId,
+          messageId,
+          phoneNumberId,
+          userPhone,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+  );
 
   return NextResponse.json({ status: 'ok' });
 }

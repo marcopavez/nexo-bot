@@ -12,6 +12,9 @@ const MESSAGE_DEDUPE_TTL_SECONDS = 60 * 60 * 48; // 48 hours
 const RATE_LIMIT_WINDOW_SECONDS = 60;
 const RATE_LIMIT_MAX_MESSAGES = 10;
 
+const BOT_RATE_LIMIT_WINDOW_SECONDS = 60;
+const BOT_RATE_LIMIT_MAX_MESSAGES = 200;
+
 const CIRCUIT_BREAKER_TTL_SECONDS = 60;
 const CIRCUIT_BREAKER_THRESHOLD = 3;
 
@@ -19,6 +22,7 @@ const BOT_MEMORY_CACHE_TTL = 120; // 2 minutes
 const EMBEDDING_CACHE_TTL = 600;  // 10 minutes
 const BOT_CONFIG_CACHE_TTL = 60;  // 1 minute
 const MESSAGE_LOCK_TTL_SECONDS = 30; // processing lock expires if worker crashes
+const CONVERSATION_LOCK_TTL_SECONDS = 25; // slightly longer than Gemini timeout; serializes concurrent messages from same user
 
 function key(phoneNumberId: string, userPhone: string): string {
   return `conv:${phoneNumberId}:${userPhone}`;
@@ -30,6 +34,10 @@ function messageKey(phoneNumberId: string, messageId: string): string {
 
 function rateLimitKey(phoneNumberId: string, userPhone: string): string {
   return `rl:${phoneNumberId}:${userPhone}`;
+}
+
+function botRateLimitKey(phoneNumberId: string): string {
+  return `rl:bot:${phoneNumberId}`;
 }
 
 function circuitBreakerKey(provider: string): string {
@@ -51,6 +59,10 @@ function botConfigKey(phoneNumberId: string): string {
 
 function messageLockKey(phoneNumberId: string, messageId: string): string {
   return `lock:msg:${phoneNumberId}:${messageId}`;
+}
+
+function conversationLockKey(phoneNumberId: string, userPhone: string): string {
+  return `lock:conv:${phoneNumberId}:${userPhone}`;
 }
 
 function getRedisClient(): Redis {
@@ -92,6 +104,31 @@ export async function acquireMessageLock(
     { nx: true, ex: MESSAGE_LOCK_TTL_SECONDS }
   );
   return result === 'OK';
+}
+
+/**
+ * Acquire a per-conversation lock to serialize concurrent messages from the same user.
+ * Prevents the history read → AI call → history write race when two messages arrive
+ * within the same AI processing window (~15s). TTL auto-releases the lock if the
+ * worker is killed before an explicit release.
+ */
+export async function acquireConversationLock(
+  phoneNumberId: string,
+  userPhone: string
+): Promise<boolean> {
+  const result = await getRedisClient().set(
+    conversationLockKey(phoneNumberId, userPhone),
+    '1',
+    { nx: true, ex: CONVERSATION_LOCK_TTL_SECONDS }
+  );
+  return result === 'OK';
+}
+
+export async function releaseConversationLock(
+  phoneNumberId: string,
+  userPhone: string
+): Promise<void> {
+  await getRedisClient().del(conversationLockKey(phoneNumberId, userPhone));
 }
 
 /**
@@ -137,6 +174,23 @@ export async function checkRateLimit(
     [String(RATE_LIMIT_WINDOW_SECONDS)]
   ) as number;
   return count <= RATE_LIMIT_MAX_MESSAGES;
+}
+
+/**
+ * Global per-bot rate limit (sliding window). Checked before the per-user limit
+ * to bound total Gemini API spend per bot per minute regardless of how many
+ * distinct users are writing simultaneously.
+ */
+export async function checkBotRateLimit(phoneNumberId: string): Promise<boolean> {
+  const k = botRateLimitKey(phoneNumberId);
+  const count = await getRedisClient().eval(
+    `local c = redis.call('INCR', KEYS[1])
+     if tonumber(c) == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+     return c`,
+    [k],
+    [String(BOT_RATE_LIMIT_WINDOW_SECONDS)]
+  ) as number;
+  return count <= BOT_RATE_LIMIT_MAX_MESSAGES;
 }
 
 // ---------------------------------------------------------------------------

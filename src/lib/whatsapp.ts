@@ -3,7 +3,11 @@ import { env } from './env';
 
 const GRAPH_API_VERSION = 'v21.0';
 
-export async function sendMessage(phoneNumberId: string, to: string, text: string): Promise<void> {
+/**
+ * Send a WhatsApp text message and return the wamid (Meta's outbound message ID).
+ * The wamid can be stored alongside the saved message record for delivery tracking.
+ */
+export async function sendMessage(phoneNumberId: string, to: string, text: string): Promise<string | null> {
   const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
 
   const res = await fetch(url, {
@@ -24,6 +28,9 @@ export async function sendMessage(phoneNumberId: string, to: string, text: strin
     const error = await res.text();
     throw new Error(`WhatsApp API error ${res.status}: ${error}`);
   }
+
+  const data = await res.json() as { messages?: Array<{ id: string }> };
+  return data.messages?.[0]?.id ?? null;
 }
 
 export function verifySignature(rawBody: string, signature: string): boolean {

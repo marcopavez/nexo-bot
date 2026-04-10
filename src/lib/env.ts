@@ -35,3 +35,14 @@ export const env = new Proxy({} as EnvShape, {
 export function getOptionalEnv(name: string): string | undefined {
   return process.env[name] || undefined;
 }
+
+/**
+ * Eagerly validate all required env vars. Call this at module scope in entry-point
+ * route files so a missing secret is caught at cold-start, not buried inside request
+ * processing where it surfaces as a cryptic failure mid-pipeline.
+ */
+export function validateEnv(): void {
+  for (const name of REQUIRED_ENV_VARS) {
+    readRequiredEnv(name);
+  }
+}

@@ -5,7 +5,9 @@ import { logEvent } from '@/lib/logger';
 import { buildSystemPrompt } from '@/lib/prompts';
 import { retrieveContext } from '@/lib/rag';
 import {
+  acquireConversationLock,
   acquireMessageLock,
+  checkBotRateLimit,
   checkRateLimit,
   clearProviderFailures,
   getCachedBot,
@@ -17,6 +19,7 @@ import {
   isProviderDegraded,
   markMessageAsProcessed,
   recordProviderFailure,
+  releaseConversationLock,
   saveHistory,
 } from '@/lib/redis';
 import {
@@ -145,9 +148,10 @@ async function handleHandoff(ctx: MessageContext): Promise<void> {
   }
 
   const reply = buildHandoffReply(bot.business_name);
-  await sendMessage(phoneNumberId, userPhone, reply);
+  const wamid = await sendMessage(phoneNumberId, userPhone, reply);
   await saveConversationMessage({
     conversationId: conversation.id,
+    whatsappMessageId: wamid,
     direction: 'outbound',
     role: 'assistant',
     intent: effectiveIntent,
@@ -218,8 +222,10 @@ async function handleBooking(
 
   history.push({ role: 'assistant', content: reply });
   await saveHistory(phoneNumberId, userPhone, history);
+  const wamid = await sendMessage(phoneNumberId, userPhone, reply);
   await saveConversationMessage({
     conversationId: conversation.id,
+    whatsappMessageId: wamid,
     direction: 'outbound',
     role: 'assistant',
     intent: effectiveIntent,
@@ -229,7 +235,6 @@ async function handleBooking(
       bookingStatus: bookingRequest.status,
     },
   });
-  await sendMessage(phoneNumberId, userPhone, reply);
 
   if (bookingFlow.shouldNotifyOwner && bot.owner_whatsapp) {
     const notification =
@@ -252,9 +257,10 @@ async function handleBooking(
 async function sendFallbackReply(ctx: MessageContext, reply: string): Promise<void> {
   const { conversation, phoneNumberId, userPhone, effectiveIntent } = ctx;
 
-  await sendMessage(phoneNumberId, userPhone, reply);
+  const wamid = await sendMessage(phoneNumberId, userPhone, reply);
   await saveConversationMessage({
     conversationId: conversation.id,
+    whatsappMessageId: wamid,
     direction: 'outbound',
     role: 'system',
     intent: effectiveIntent,
@@ -333,8 +339,10 @@ async function handleLLMFlow(
 
     history.push({ role: 'assistant', content: result.text });
     await saveHistory(phoneNumberId, userPhone, history);
+    const wamid = await sendMessage(phoneNumberId, userPhone, result.text);
     await saveConversationMessage({
       conversationId: conversation.id,
+      whatsappMessageId: wamid,
       direction: 'outbound',
       role: 'assistant',
       intent: effectiveIntent,
@@ -344,7 +352,6 @@ async function handleLLMFlow(
         outputTokens: result.outputTokens,
       },
     });
-    await sendMessage(phoneNumberId, userPhone, result.text);
 
     logEvent('info', 'WhatsApp reply sent', {
       correlationId, messageId, phoneNumberId, userPhone,
@@ -364,10 +371,47 @@ async function handleLLMFlow(
 }
 
 // ---------------------------------------------------------------------------
-// Entry point
+// Entry point helpers
 // ---------------------------------------------------------------------------
 
 const MAX_USER_TEXT_LENGTH = 2000;
+
+/**
+ * Try to acquire the per-conversation lock with up to `maxRetries` attempts.
+ * Falls back to `true` (fail-open) on Redis errors so a Redis outage never
+ * causes silent message loss. Returns whether the lock was acquired (callers
+ * should only release if this returns `true` from a successful Redis SET).
+ */
+async function tryAcquireConversationLock(
+  phoneNumberId: string,
+  userPhone: string,
+  correlationId: string,
+  maxRetries = 3,
+  retryDelayMs = 2000
+): Promise<boolean> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const acquired = await acquireConversationLock(phoneNumberId, userPhone);
+      if (acquired) return true;
+    } catch (err) {
+      logEvent('warn', 'Redis unavailable for conversation lock — proceeding without lock', {
+        correlationId, phoneNumberId, userPhone,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return true; // fail-open: proceed without lock rather than drop the message
+    }
+
+    if (attempt < maxRetries) {
+      await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+
+  // Could not acquire after all retries; log and proceed anyway (fail-soft).
+  logEvent('warn', 'Could not acquire conversation lock after retries — proceeding without lock', {
+    correlationId, phoneNumberId, userPhone,
+  });
+  return false; // caller must NOT call releaseConversationLock when false
+}
 
 export async function processIncomingMessage(params: {
   correlationId: string;
@@ -382,7 +426,17 @@ export async function processIncomingMessage(params: {
 
   // Step 1: Acquire a short-lived processing lock (30s) to guard against concurrent
   // duplicate deliveries from Meta. This is separate from the permanent dedup key.
-  const lockAcquired = await acquireMessageLock(phoneNumberId, messageId);
+  // Fail-open on Redis errors: rare duplicate processing is better than silent message loss.
+  let lockAcquired: boolean;
+  try {
+    lockAcquired = await acquireMessageLock(phoneNumberId, messageId);
+  } catch (err) {
+    logEvent('warn', 'Redis unavailable for message lock — proceeding without lock', {
+      correlationId, messageId, phoneNumberId, userPhone,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    lockAcquired = true;
+  }
   if (!lockAcquired) {
     logEvent('info', 'Message processing lock held by another worker — skipping', {
       correlationId, messageId, phoneNumberId, userPhone,
@@ -391,10 +445,33 @@ export async function processIncomingMessage(params: {
   }
 
   // Step 2: Check if already permanently processed (successful previous run).
-  if (await isMessageProcessed(phoneNumberId, messageId)) {
+  // Fail-open on Redis errors: treat as unprocessed rather than drop the message.
+  let alreadyProcessed: boolean;
+  try {
+    alreadyProcessed = await isMessageProcessed(phoneNumberId, messageId);
+  } catch (err) {
+    logEvent('warn', 'Redis unavailable for dedup check — treating message as unprocessed', {
+      correlationId, messageId, phoneNumberId, userPhone,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    alreadyProcessed = false;
+  }
+  if (alreadyProcessed) {
     logEvent('info', 'Duplicate WhatsApp message ignored', {
       correlationId, messageId, phoneNumberId, userPhone,
     });
+    return;
+  }
+
+  // Per-bot global cap — checked first to bound total Gemini API spend per minute
+  // regardless of how many distinct users are writing to the same bot simultaneously.
+  const withinBotLimit = await checkBotRateLimit(phoneNumberId);
+  if (!withinBotLimit) {
+    logEvent('warn', 'Bot-level rate limit exceeded', {
+      correlationId, messageId, phoneNumberId, userPhone,
+    });
+    await sendMessage(phoneNumberId, userPhone, RATE_LIMIT_REPLY);
+    await markMessageAsProcessed(phoneNumberId, messageId);
     return;
   }
 
@@ -487,17 +564,31 @@ export async function processIncomingMessage(params: {
     return;
   }
 
-  const history = await getHistory(phoneNumberId, userPhone);
-  history.push({ role: 'user', content: userText });
+  // Acquire a per-conversation lock before reading history to prevent a race where
+  // two concurrent messages from the same user both read the same history snapshot,
+  // run independent AI calls, and the second saveHistory silently overwrites the first.
+  // The lock is released in the finally block; TTL auto-releases if the worker is killed.
+  const convLockAcquired = await tryAcquireConversationLock(
+    phoneNumberId, userPhone, correlationId
+  );
 
-  if (effectiveIntent === 'booking') {
-    await handleBooking(ctx, activeBooking, history);
+  try {
+    const history = await getHistory(phoneNumberId, userPhone);
+    history.push({ role: 'user', content: userText });
+
+    if (effectiveIntent === 'booking') {
+      await handleBooking(ctx, activeBooking, history);
+      await markMessageAsProcessed(phoneNumberId, messageId);
+      return;
+    }
+
+    await handleLLMFlow(ctx, history);
+    // Mark permanently processed only after full successful completion so that
+    // failures (LLM down, DB error, etc.) allow Meta's webhook retry to re-run.
     await markMessageAsProcessed(phoneNumberId, messageId);
-    return;
+  } finally {
+    if (convLockAcquired) {
+      await releaseConversationLock(phoneNumberId, userPhone).catch(() => {});
+    }
   }
-
-  await handleLLMFlow(ctx, history);
-  // Mark permanently processed only after full successful completion so that
-  // failures (LLM down, DB error, etc.) allow Meta's webhook retry to re-run.
-  await markMessageAsProcessed(phoneNumberId, messageId);
 }
