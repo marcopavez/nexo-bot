@@ -1,11 +1,25 @@
-import { createHmac } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 
-function computeSessionToken(secret: string): string {
-  return createHmac('sha256', secret).update('nexo-admin-session-v1').digest('hex');
+async function computeSessionToken(secret: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign(
+    'HMAC',
+    key,
+    encoder.encode('nexo-admin-session-v1')
+  );
+  return Array.from(new Uint8Array(signature))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Allow login page and auth endpoints through unconditionally
@@ -15,8 +29,6 @@ export function middleware(request: NextRequest) {
 
   const adminSecret = process.env.ADMIN_SECRET;
   if (!adminSecret) {
-    // No secret configured — deny by default to prevent accidental data exposure.
-    // Set ADMIN_SECRET in your environment variables to enable the admin panel.
     if (pathname.startsWith('/api/')) {
       return NextResponse.json({ error: 'Admin panel not configured' }, { status: 503 });
     }
@@ -24,7 +36,7 @@ export function middleware(request: NextRequest) {
   }
 
   const token = request.cookies.get('admin_token')?.value;
-  const expectedToken = computeSessionToken(adminSecret);
+  const expectedToken = await computeSessionToken(adminSecret);
   if (token !== expectedToken) {
     if (pathname.startsWith('/api/')) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
