@@ -6,3 +6,5 @@ node_modules/
 out/
 *.log
 .vercel
+tsconfig.tsbuildinfo
+.codex
