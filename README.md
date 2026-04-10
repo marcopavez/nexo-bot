@@ -237,6 +237,163 @@ Recommended client price: $80.000–150.000 CLP/month.
 - [ ] Panel mínimo operativo: ver conversaciones, etiquetar intents, activar/desactivar flujos
 - [ ] Memoria persistente mínima por cliente (empresa, rubro, historial relevante)
 
+<details>
+<summary><strong>Plan de implementación detallado — Fase 2</strong></summary>
+
+#### Decisiones arquitectónicas
+
+| Decisión | Elección | Motivo |
+|----------|----------|--------|
+| Modelo de embeddings | OpenAI `text-embedding-3-small` (512 dims) | $0.02/1M tokens. Soporte Matryoshka para 512d = 3x menos storage vs 1536d, pérdida de calidad mínima para contenido SMB en español |
+| Vector store | pgvector en Supabase | Ya usamos Supabase, sin infra nueva. Extensión + función RPC para similarity search |
+| Chunking | ~2000 chars con 200-char overlap, split por párrafos primero | Simple, funciona bien para documentos de negocio estructurados |
+| Admin UI | Tailwind CSS + Next.js App Router (server + client components) | Zero JS overhead para estilos, patrón estándar Next.js |
+| OPENAI_API_KEY | Variable de entorno opcional (no en el array required) | RAG es opt-in por bot; bots sin knowledge base siguen funcionando |
+
+#### Fase 2a — Fundaciones
+
+**1. Migración SQL: `supabase/phase2.sql`**
+- Habilitar extensión pgvector
+- Crear tablas: `knowledge_base_documents`, `document_versions`, `document_chunks` (con columna `vector(512)`), `bot_memory`
+- Agregar columna `enabled_flows` (JSONB) a tabla `bots`
+- Crear función RPC `match_document_chunks` (distancia coseno)
+- Crear índices
+
+**2. Dependencias**
+- `openai` en dependencies
+- `tailwindcss`, `postcss`, `autoprefixer` en devDependencies
+- Crear `tailwind.config.ts`, `postcss.config.mjs`, `src/app/globals.css`
+- Actualizar `src/app/layout.tsx` para importar globals.css
+
+**3. Actualizar archivos existentes**
+- `src/lib/env.ts` — agregar helper `getOptionalEnv()`
+- `src/lib/types.ts` — agregar interfaces `KnowledgeBaseDocument`, `DocumentVersion`, `DocumentChunk`, `BotMemory`, `Message`; actualizar `Bot` con `enabled_flows`
+
+#### Fase 2b — Módulos backend
+
+**4. `src/lib/embeddings.ts`** — cliente OpenAI lazy singleton, `generateEmbedding(text)`, `generateEmbeddings(texts[])`
+
+**5. `src/lib/rag.ts`** — `chunkDocument(text)`, `indexDocument(botId, docId, content)`, `retrieveContext(botId, query, maxChunks?)`, `deleteDocumentChunks(docId)`
+
+**6. `src/lib/bot-memory.ts`** — `getMemories(botId)`, `setMemory(botId, key, value, source)`, `deleteMemory(botId, key)`, `formatMemoryContext(memories)`
+
+**7. `src/lib/supabase.ts`** — agregar funciones CRUD para: bots (list, getById), conversaciones (list paginado, mensajes), knowledge base (CRUD + versiones + chunks), bot memory (CRUD), RPC `matchDocumentChunks`, `updateBotFlows`
+
+#### Fase 2c — Integración orquestador
+
+**8. `src/lib/orchestrator.ts`**
+- Importar `retrieveContext` de rag.ts, `getMemories`/`formatMemoryContext` de bot-memory.ts
+- En `handleLLMFlow` (línea ~212): inyectar contexto RAG + bot memory en system prompt entre prompt base e instrucciones de intent
+- En `processIncomingMessage`: verificar `bot.enabled_flows` — si el intent detectado está deshabilitado, responder con mensaje "Este servicio no está disponible"
+
+#### Fase 2d — API Routes del panel admin (10 archivos)
+
+Todos bajo `src/app/api/admin/`:
+
+| Ruta | Métodos | Propósito |
+|------|---------|-----------|
+| `bots/route.ts` | GET | Listar bots |
+| `bots/[botId]/conversations/route.ts` | GET | Listar conversaciones (paginado) |
+| `bots/[botId]/conversations/[conversationId]/messages/route.ts` | GET | Hilo de mensajes |
+| `bots/[botId]/conversations/[conversationId]/label/route.ts` | PATCH | Re-etiquetar intent |
+| `bots/[botId]/knowledge-base/route.ts` | GET, POST | Listar/crear documentos |
+| `bots/[botId]/knowledge-base/[documentId]/route.ts` | GET, PUT, DELETE | CRUD documentos + re-indexar |
+| `bots/[botId]/knowledge-base/[documentId]/rollback/route.ts` | POST | Rollback a versión N |
+| `bots/[botId]/memory/route.ts` | GET, POST | Listar/upsert memoria |
+| `bots/[botId]/memory/[memoryId]/route.ts` | DELETE | Eliminar entrada de memoria |
+| `bots/[botId]/flows/route.ts` | GET, PATCH | Obtener/toggle flujos habilitados |
+
+#### Fase 2e — Páginas del panel admin (11 archivos)
+
+Todos bajo `src/app/admin/`:
+
+| Página | Tipo | Propósito |
+|--------|------|-----------|
+| `layout.tsx` | Server | Layout con sidebar de navegación |
+| `page.tsx` | Server | Dashboard redirect/resumen |
+| `bots/page.tsx` | Server | Lista de bots |
+| `bots/[botId]/page.tsx` | Server | Detalle de bot + stats |
+| `bots/[botId]/conversations/page.tsx` | Server | Lista de conversaciones |
+| `bots/[botId]/conversations/[conversationId]/page.tsx` | Client | Hilo de mensajes + dropdown para etiquetar intent |
+| `bots/[botId]/knowledge-base/page.tsx` | Server+Client | Lista de documentos + toggle activo |
+| `bots/[botId]/knowledge-base/new/page.tsx` | Client | Formulario crear documento |
+| `bots/[botId]/knowledge-base/[documentId]/page.tsx` | Client | Detalle documento + versiones + editar/rollback |
+| `bots/[botId]/memory/page.tsx` | Client | Editor key-value de memoria |
+| `bots/[botId]/flows/page.tsx` | Client | Toggle switches por flujo |
+
+Sin autenticación en esta fase (se implementa en Fase 3).
+
+#### Estructura de archivos nuevos (~35 archivos)
+
+```
+src/
+├── app/
+│   ├── globals.css                                          ← Tailwind directives
+│   ├── admin/
+│   │   ├── layout.tsx                                       ← sidebar nav
+│   │   ├── page.tsx                                         ← dashboard
+│   │   └── bots/
+│   │       ├── page.tsx                                     ← bot list
+│   │       └── [botId]/
+│   │           ├── page.tsx                                 ← bot detail
+│   │           ├── conversations/
+│   │           │   ├── page.tsx                             ← conversation list
+│   │           │   └── [conversationId]/
+│   │           │       └── page.tsx                         ← message thread
+│   │           ├── knowledge-base/
+│   │           │   ├── page.tsx                             ← document list
+│   │           │   ├── new/
+│   │           │   │   └── page.tsx                         ← create document
+│   │           │   └── [documentId]/
+│   │           │       └── page.tsx                         ← document detail
+│   │           ├── memory/
+│   │           │   └── page.tsx                             ← memory editor
+│   │           └── flows/
+│   │               └── page.tsx                             ← flow toggles
+│   └── api/
+│       └── admin/
+│           └── bots/
+│               ├── route.ts                                 ← GET bots
+│               └── [botId]/
+│                   ├── conversations/
+│                   │   ├── route.ts                         ← GET conversations
+│                   │   └── [conversationId]/
+│                   │       ├── messages/
+│                   │       │   └── route.ts                 ← GET messages
+│                   │       └── label/
+│                   │           └── route.ts                 ← PATCH intent
+│                   ├── knowledge-base/
+│                   │   ├── route.ts                         ← GET/POST documents
+│                   │   └── [documentId]/
+│                   │       ├── route.ts                     ← GET/PUT/DELETE document
+│                   │       └── rollback/
+│                   │           └── route.ts                 ← POST rollback
+│                   ├── memory/
+│                   │   ├── route.ts                         ← GET/POST memory
+│                   │   └── [memoryId]/
+│                   │       └── route.ts                     ← DELETE memory
+│                   └── flows/
+│                       └── route.ts                         ← GET/PATCH flows
+└── lib/
+    ├── embeddings.ts                                        ← OpenAI embedding client
+    ├── rag.ts                                               ← chunking + indexing + retrieval
+    └── bot-memory.ts                                        ← memory CRUD + formatting
+supabase/
+└── phase2.sql                                               ← migración pgvector + tablas nuevas
+tailwind.config.ts
+postcss.config.mjs
+```
+
+#### Verificación
+
+1. `npm run build` debe completar sin errores
+2. Ejecutar `supabase/phase2.sql` en Supabase SQL Editor
+3. Crear un documento via POST `/api/admin/bots/{id}/knowledge-base`, enviar mensaje WhatsApp sobre ese contenido — el bot debe usar el contexto de knowledge base
+4. Navegar a `/admin` — verificar lista de bots, visor de conversaciones, CRUD de documentos, editor de memoria, y toggles de flujos
+5. Compatibilidad backward: bots sin knowledge base ni memoria siguen funcionando igual (arrays vacíos retornados gracefully)
+
+</details>
+
 ### Fase 3 — Seguridad y Cumplimiento (Semanas 5-6)
 
 - [ ] RLS en todas las tablas de Supabase (policies por `bot_id`)
