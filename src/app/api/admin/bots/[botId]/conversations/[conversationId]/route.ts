@@ -1,12 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { updateConversationStatus } from '@/lib/supabase';
+import { getConversation, updateConversationStatus } from '@/lib/supabase';
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: Promise<{ conversationId: string }> }
+  { params }: { params: Promise<{ botId: string; conversationId: string }> }
 ) {
   try {
-    const { conversationId } = await params;
+    const { botId, conversationId } = await params;
+
+    const conversation = await getConversation(conversationId);
+    if (!conversation || conversation.bot_id !== botId) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
+
     const body = await request.json();
     const status = body.status as string;
 

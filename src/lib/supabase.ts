@@ -262,6 +262,17 @@ export async function updateBotFlows(
 // Phase 2 — Conversations (admin)
 // ---------------------------------------------------------------------------
 
+export async function getConversation(conversationId: string): Promise<Conversation | null> {
+  const { data, error } = await getSupabaseClient()
+    .from('conversations')
+    .select('*')
+    .eq('id', conversationId)
+    .single();
+
+  if (error) return null;
+  return data as Conversation;
+}
+
 export async function listConversations(
   botId: string,
   page: number = 1,

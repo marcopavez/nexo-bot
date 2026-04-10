@@ -1,12 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { listMessages } from '@/lib/supabase';
+import { getConversation, listMessages } from '@/lib/supabase';
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: Promise<{ conversationId: string }> }
+  { params }: { params: Promise<{ botId: string; conversationId: string }> }
 ) {
   try {
-    const { conversationId } = await params;
+    const { botId, conversationId } = await params;
+
+    const conversation = await getConversation(conversationId);
+    if (!conversation || conversation.bot_id !== botId) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
+
     const { searchParams } = new URL(request.url);
     const limit = Math.min(Number(searchParams.get('limit') ?? 100), 500);
     const offset = Number(searchParams.get('offset') ?? 0);
