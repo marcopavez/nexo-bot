@@ -22,8 +22,24 @@ export default async function BotDetailPage({
 
   return (
     <div>
-      <h1 className="text-xl font-semibold mb-1">{bot.business_name}</h1>
+      <div className="flex items-start justify-between mb-1">
+        <h1 className="text-xl font-semibold">{bot.business_name}</h1>
+        <Link
+          href={`/admin/bots/${botId}/edit`}
+          className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 text-gray-600"
+        >
+          Editar
+        </Link>
+      </div>
       <p className="text-sm text-gray-500 mb-6">{bot.business_type} · {bot.phone_number_id}</p>
+
+      {bot.hours && (
+        <p className="text-xs text-gray-500 mb-1">Horario: {bot.hours}</p>
+      )}
+      {bot.address && (
+        <p className="text-xs text-gray-500 mb-4">Dirección: {bot.address}</p>
+      )}
+
       <ul className="space-y-2">
         {nav.map((item) => (
           <li key={item.href}>
