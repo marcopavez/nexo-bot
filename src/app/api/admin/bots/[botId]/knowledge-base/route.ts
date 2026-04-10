@@ -26,8 +26,14 @@ export async function POST(
     const body = await request.json();
     const { title, content } = body as { title: string; content: string };
 
-    if (!title || !content) {
+    if (typeof title !== 'string' || typeof content !== 'string' || !title.trim() || !content.trim()) {
       return NextResponse.json({ error: 'title and content are required' }, { status: 400 });
+    }
+    if (title.length > 200) {
+      return NextResponse.json({ error: 'title must be 200 characters or fewer' }, { status: 400 });
+    }
+    if (content.length > 100_000) {
+      return NextResponse.json({ error: 'content must be 100,000 characters or fewer' }, { status: 400 });
     }
 
     // Create with indexing_status='pending' — indexing is triggered separately

@@ -40,6 +40,16 @@ export async function PUT(
       is_active?: boolean;
     };
 
+    if (title !== undefined && (typeof title !== 'string' || title.length > 200)) {
+      return NextResponse.json({ error: 'title must be a string of 200 characters or fewer' }, { status: 400 });
+    }
+    if (content !== undefined && (typeof content !== 'string' || content.length > 100_000)) {
+      return NextResponse.json({ error: 'content must be a string of 100,000 characters or fewer' }, { status: 400 });
+    }
+    if (is_active !== undefined && typeof is_active !== 'boolean') {
+      return NextResponse.json({ error: 'is_active must be a boolean' }, { status: 400 });
+    }
+
     const current = await getDocument(documentId);
     if (!current || current.bot_id !== botId) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });

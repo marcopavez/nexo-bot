@@ -26,8 +26,14 @@ export async function POST(
     const body = await request.json();
     const { key, value, source } = body as { key: string; value: string; source?: 'manual' | 'conversation' };
 
-    if (!key || !value) {
-      return NextResponse.json({ error: 'key and value are required' }, { status: 400 });
+    if (typeof key !== 'string' || typeof value !== 'string' || !key.trim() || !value.trim()) {
+      return NextResponse.json({ error: 'key and value are required strings' }, { status: 400 });
+    }
+    if (key.length > 100) {
+      return NextResponse.json({ error: 'key must be 100 characters or fewer' }, { status: 400 });
+    }
+    if (value.length > 2000) {
+      return NextResponse.json({ error: 'value must be 2,000 characters or fewer' }, { status: 400 });
     }
 
     const memory = await upsertBotMemory({ botId, key, value, source });
