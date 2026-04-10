@@ -1,6 +1,51 @@
 import { getSupabaseClient } from './client';
 import type { BookingRequest } from '../types';
 
+export async function listBookingRequests(
+  botId: string,
+  status?: BookingRequest['status'][]
+): Promise<BookingRequest[]> {
+  let query = getSupabaseClient()
+    .from('booking_requests')
+    .select('*')
+    .eq('bot_id', botId)
+    .order('created_at', { ascending: false });
+
+  if (status) {
+    query = query.in('status', status);
+  }
+
+  const { data, error } = await query;
+  if (error) throw new Error(`Failed to list booking requests: ${error.message}`);
+  return (data ?? []) as BookingRequest[];
+}
+
+export async function getBookingRequest(bookingId: string): Promise<BookingRequest | null> {
+  const { data, error } = await getSupabaseClient()
+    .from('booking_requests')
+    .select('*')
+    .eq('id', bookingId)
+    .single();
+
+  if (error || !data) return null;
+  return data as BookingRequest;
+}
+
+export async function updateBookingStatus(
+  bookingId: string,
+  status: BookingRequest['status']
+): Promise<BookingRequest> {
+  const { data, error } = await getSupabaseClient()
+    .from('booking_requests')
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq('id', bookingId)
+    .select('*')
+    .single();
+
+  if (error || !data) throw new Error(`Failed to update booking status: ${error?.message ?? 'unknown error'}`);
+  return data as BookingRequest;
+}
+
 export async function saveLead(
   botId: string,
   userPhone: string,

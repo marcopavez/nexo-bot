@@ -14,6 +14,7 @@ export default async function BotDetailPage({
   if (!bot) notFound();
 
   const nav = [
+    { label: 'Agendamientos', href: `/admin/bots/${botId}/bookings` },
     { label: 'Conversaciones', href: `/admin/bots/${botId}/conversations` },
     { label: 'Base de conocimiento', href: `/admin/bots/${botId}/knowledge-base` },
     { label: 'Memoria', href: `/admin/bots/${botId}/memory` },
