@@ -6,8 +6,7 @@ import {
   createDocumentVersion,
   getLatestDocumentVersion,
 } from '@/lib/supabase';
-import { indexDocument, deleteDocumentChunks } from '@/lib/rag';
-import { getOptionalEnv } from '@/lib/env';
+import { deleteDocumentChunks } from '@/lib/rag';
 
 export async function GET(
   _request: Request,
@@ -48,15 +47,14 @@ export async function PUT(
 
     const contentChanged = content !== undefined;
 
-    // Mark as pending before re-indexing so callers see the transition
+    // If content changed, reset to pending — caller must trigger /index separately
     const updated = await updateDocument(documentId, {
       title,
       content,
       is_active,
-      ...(contentChanged && getOptionalEnv('OPENAI_API_KEY') ? { indexing_status: 'pending' } : {}),
+      ...(contentChanged ? { indexing_status: 'pending' } : {}),
     });
 
-    // Save new version if content or title changed
     if (contentChanged || title !== undefined) {
       const latestVersion = await getLatestDocumentVersion(documentId);
       await createDocumentVersion({
@@ -65,17 +63,6 @@ export async function PUT(
         title: updated.title,
         content: updated.content,
       });
-
-      if (getOptionalEnv('OPENAI_API_KEY') && contentChanged) {
-        try {
-          await indexDocument(botId, documentId, updated.content);
-          await updateDocument(documentId, { indexing_status: 'indexed' });
-          updated.indexing_status = 'indexed';
-        } catch {
-          await updateDocument(documentId, { indexing_status: 'failed' }).catch(() => {});
-          updated.indexing_status = 'failed';
-        }
-      }
     }
 
     return NextResponse.json({ document: updated });

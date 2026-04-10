@@ -9,24 +9,37 @@ export default function NewDocumentPage() {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState('');
   const [error, setError] = useState('');
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
     setError('');
+    setStatus('Guardando…');
 
-    const res = await fetch(`/api/admin/bots/${botId}/knowledge-base`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, content }),
-    });
+    try {
+      const res = await fetch(`/api/admin/bots/${botId}/knowledge-base`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, content }),
+      });
 
-    if (res.ok) {
+      if (!res.ok) {
+        const data = await res.json();
+        setError(data.error ?? 'Error al guardar');
+        return;
+      }
+
+      const { document } = await res.json();
+
+      // Trigger indexing in the background — non-blocking for navigation
+      setStatus('Indexando…');
+      fetch(`/api/admin/bots/${botId}/knowledge-base/${document.id}/index`, { method: 'POST' })
+        .catch(() => {/* indexing failure is visible in the list via indexing_status */});
+
       router.push(`/admin/bots/${botId}/knowledge-base`);
-    } else {
-      const data = await res.json();
-      setError(data.error ?? 'Error al guardar');
+    } finally {
       setSaving(false);
     }
   }
@@ -56,13 +69,14 @@ export default function NewDocumentPage() {
           />
         </div>
         {error && <p className="text-sm text-red-600">{error}</p>}
+        {status && !error && <p className="text-sm text-gray-500">{status}</p>}
         <div className="flex gap-2">
           <button
             type="submit"
             disabled={saving}
             className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 disabled:opacity-50"
           >
-            {saving ? 'Guardando…' : 'Guardar'}
+            {saving ? status : 'Guardar'}
           </button>
           <button
             type="button"

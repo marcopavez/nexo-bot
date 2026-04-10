@@ -34,6 +34,7 @@ export default function DocumentDetailPage() {
     e.preventDefault();
     setSaving(true);
     setMessage('');
+    const contentChanged = content !== doc?.content;
     const res = await fetch(`/api/admin/bots/${botId}/knowledge-base/${documentId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -43,6 +44,16 @@ export default function DocumentDetailPage() {
     if (res.ok) {
       setDoc(data.document);
       setMessage('Guardado correctamente');
+      if (contentChanged) {
+        setMessage('Guardado. Indexando en segundo plano…');
+        fetch(`/api/admin/bots/${botId}/knowledge-base/${documentId}/index`, { method: 'POST' })
+          .then((r) => r.json())
+          .then((d) => {
+            setDoc((prev) => prev ? { ...prev, indexing_status: d.indexing_status ?? prev.indexing_status } : prev);
+            setMessage(d.indexing_status === 'indexed' ? 'Guardado e indexado' : 'Guardado (indexación fallida — usa Reintentar)');
+          })
+          .catch(() => setMessage('Guardado (error al indexar)'));
+      }
     } else {
       setMessage(data.error ?? 'Error al guardar');
     }

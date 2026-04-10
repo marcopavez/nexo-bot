@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { listDocuments, createDocument, createDocumentVersion, getLatestDocumentVersion, updateDocument } from '@/lib/supabase';
-import { indexDocument } from '@/lib/rag';
-import { getOptionalEnv } from '@/lib/env';
+import { listDocuments, createDocument, createDocumentVersion } from '@/lib/supabase';
 
 export async function GET(
   _request: Request,
@@ -32,28 +30,15 @@ export async function POST(
       return NextResponse.json({ error: 'title and content are required' }, { status: 400 });
     }
 
-    // Create with indexing_status='pending' (set by createDocument default)
+    // Create with indexing_status='pending' — indexing is triggered separately
     const document = await createDocument({ botId, title, content });
 
-    // Save initial version
     await createDocumentVersion({
       documentId: document.id,
       version: 1,
       title: document.title,
       content: document.content,
     });
-
-    // Index if OpenAI is configured; update status when done
-    if (getOptionalEnv('OPENAI_API_KEY')) {
-      try {
-        await indexDocument(botId, document.id, content);
-        await updateDocument(document.id, { indexing_status: 'indexed' });
-        document.indexing_status = 'indexed';
-      } catch {
-        await updateDocument(document.id, { indexing_status: 'failed' }).catch(() => {});
-        document.indexing_status = 'failed';
-      }
-    }
 
     return NextResponse.json({ document }, { status: 201 });
   } catch (err) {

@@ -1,8 +1,15 @@
 import Link from 'next/link';
 import { listDocuments } from '@/lib/supabase';
 import ToggleActive from './_toggle-active';
+import RetryIndex from './_retry-index';
 
 export const dynamic = 'force-dynamic';
+
+const STATUS_BADGE: Record<string, string> = {
+  indexed: 'bg-green-100 text-green-700',
+  pending: 'bg-yellow-100 text-yellow-700',
+  failed: 'bg-red-100 text-red-700',
+};
 
 export default async function KnowledgeBasePage({
   params,
@@ -41,6 +48,12 @@ export default async function KnowledgeBasePage({
                   {new Date(doc.updated_at).toLocaleDateString('es-CL')}
                 </p>
               </div>
+              <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_BADGE[doc.indexing_status] ?? 'bg-gray-100 text-gray-500'}`}>
+                {doc.indexing_status}
+              </span>
+              {doc.indexing_status === 'failed' && (
+                <RetryIndex botId={botId} documentId={doc.id} />
+              )}
               <ToggleActive
                 botId={botId}
                 documentId={doc.id}
